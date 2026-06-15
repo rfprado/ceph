@@ -1,0 +1,65 @@
+---
+- name: Orquestração e Configuração de Dependências com Validação de Internet
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: 1. Corrigir DNS (/etc/resolv.conf)
+      ansible.builtin.copy:
+        dest: /etc/resolv.conf
+        content: |
+          nameserver 8.8.8.8
+          nameserver 1.1.1.1
+        mode: '0644'
+
+    - name: 2. Ajustar métrica do gateway padrão da interface NAT
+      ansible.builtin.shell: |
+        NAT_IFACE=$(ip route show default | awk '{print $5}' | head -n1)
+        if [ -n "$NAT_IFACE" ]; then
+          nmcli connection modify "$NAT_IFACE" ipv4.route-metric 50 2>/dev/null || true
+          nmcli connection up "$NAT_IFACE" 2>/dev/null || true
+        fi
+      register: nat_metric_result
+      changed_when: false
+
+    - name: 3. Ajustar tabelas de rotas adicionais
+      ansible.builtin.shell: |
+        ip route del default dev eth1 2>/dev/null || true
+        ip route add default via 10.0.2.2 dev eth0 metric 50 2>/dev/null || true
+        ip route add 192.168.1.0/24 dev eth1 metric 100 2>/dev/null || true
+      register: route_result
+      changed_when: false
+
+    - name: 4. ASSEGURAR CONECTIVIDADE COM A INTERNET (Timeout de 60s)
+      ansible.builtin.uri:
+        url: http://clients3.google.com/generate_204
+        status_code: 204
+      register: internet_check
+      until: internet_check.status == 204
+      retries: 12   # Tenta 12 vezes
+      delay: 5      # Aguarda 5 segundos entre as tentativas (12 * 5 = 60 segundos no total)
+
+    - name: 5. Habilitar repositório CRB (Code Ready Builder)
+      ansible.builtin.shell: dnf config-manager --set-enabled crb -y
+      pattern: "crb"
+      changed_when: false
+
+    - name: 6. Instalar Repositórios EPEL
+      ansible.builtin.dnf:
+        name:
+          - epel-release
+          - epel-next-release
+        state: present
+        update_cache: yes
+
+    - name: 7. Atualizar o Sistema e Instalar Pacotes de Dependência
+      ansible.builtin.dnf:
+        name:
+          - sshpass
+          - net-tools
+          - bind-utils
+          - vim
+          - nmap-ncat		  
+        state: present
+        update_only: no
